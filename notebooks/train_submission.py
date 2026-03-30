@@ -95,19 +95,31 @@ print(f"Training data: {TRAIN_DATA_PATH}")
 
 import site
 
-# Try to find the nvidia utility script
-cutlass_paths = glob.glob("/kaggle/usr/lib/notebooks/ryanholbrook/nvidia-utility-script/nvidia_cutlass_dsl/python_packages/")
-if cutlass_paths:
-    site.addsitedir(cutlass_paths[0])
-    print(f"Added CUTLASS path: {cutlass_paths[0]}")
-else:
-    # Try alternative paths
-    alt_paths = glob.glob("/kaggle/input/**/nvidia_cutlass_dsl/python_packages/", recursive=True)
-    if alt_paths:
-        site.addsitedir(alt_paths[0])
-        print(f"Added CUTLASS path (alt): {alt_paths[0]}")
-    else:
-        print("WARNING: CUTLASS path not found. Mamba layers may not work.")
+# Find and add CUTLASS python packages path
+# The nvidia utility script contains cutlass — try all known path patterns
+cutlass_search_patterns = [
+    "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia-utility-script/nvidia_cutlass_dsl/python_packages/",
+    "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia_utility_script/nvidia_cutlass_dsl/python_packages/",
+    "/kaggle/usr/lib/notebooks/*/nvidia_cutlass_dsl/python_packages/",
+    "/kaggle/input/**/nvidia_cutlass_dsl/python_packages/",
+]
+
+cutlass_found = False
+for pattern in cutlass_search_patterns:
+    matches = glob.glob(pattern, recursive=True)
+    if matches:
+        site.addsitedir(matches[0])
+        print(f"Added CUTLASS path: {matches[0]}")
+        cutlass_found = True
+        break
+
+if not cutlass_found:
+    # Last resort: search everywhere
+    import subprocess
+    result = subprocess.run("find /kaggle -name 'cutlass' -type d 2>/dev/null | head -5",
+                          shell=True, capture_output=True, text=True)
+    print(f"CUTLASS search results:\n{result.stdout}")
+    print("WARNING: CUTLASS path not found. Mamba layers may not work.")
 
 # ============================================================
 # CELL 4: Load Model and Tokenizer
