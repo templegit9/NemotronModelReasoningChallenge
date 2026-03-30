@@ -94,9 +94,16 @@ print(f"Training data: {TRAIN_DATA_PATH}")
 # ============================================================
 
 import site
+import subprocess
 
-# Find and add CUTLASS python packages path
-# The nvidia utility script contains cutlass — try all known path patterns
+# Step 1: Fix ptxas binary permissions (required for Triton/Mamba kernels)
+# This is exactly what the official metric notebook does
+ptxas_binaries = glob.glob("/kaggle/usr/lib/notebooks/*/triton/backends/nvidia/bin/ptxas*")
+for ptxas_path in ptxas_binaries:
+    subprocess.run(f"chmod +x {ptxas_path}", shell=True)
+    print(f"Set execute permission: {ptxas_path}")
+
+# Step 2: Find and add CUTLASS python packages path
 cutlass_search_patterns = [
     "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia-utility-script/nvidia_cutlass_dsl/python_packages/",
     "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia_utility_script/nvidia_cutlass_dsl/python_packages/",
@@ -114,11 +121,6 @@ for pattern in cutlass_search_patterns:
         break
 
 if not cutlass_found:
-    # Last resort: search everywhere
-    import subprocess
-    result = subprocess.run("find /kaggle -name 'cutlass' -type d 2>/dev/null | head -5",
-                          shell=True, capture_output=True, text=True)
-    print(f"CUTLASS search results:\n{result.stdout}")
     print("WARNING: CUTLASS path not found. Mamba layers may not work.")
 
 # ============================================================
