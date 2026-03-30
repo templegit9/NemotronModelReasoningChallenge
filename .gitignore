@@ -1,0 +1,4 @@
+kaggle_api.txt
+__pycache__/
+*.pyc
+.DS_Store
