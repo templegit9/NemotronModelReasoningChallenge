@@ -93,35 +93,69 @@ print(f"Training data: {TRAIN_DATA_PATH}")
 # CELL 3: Setup CUTLASS (required for Mamba layers)
 # ============================================================
 
+import sys
 import site
 import subprocess
+import shutil
 
-# Step 1: Fix ptxas binary permissions (required for Triton/Mamba kernels)
-# This is exactly what the official metric notebook does
-ptxas_binaries = glob.glob("/kaggle/usr/lib/notebooks/*/triton/backends/nvidia/bin/ptxas*")
-for ptxas_path in ptxas_binaries:
-    subprocess.run(f"chmod +x {ptxas_path}", shell=True)
-    print(f"Set execute permission: {ptxas_path}")
+# The /kaggle/usr/lib/ filesystem is read-only, so ptxas binaries aren't executable.
+# We copy them to /tmp, chmod +x, then monkey-patch the already-loaded triton module
+# to use our executable copies instead of the read-only originals.
 
-# Step 2: Find and add CUTLASS python packages path
-cutlass_search_patterns = [
-    "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia-utility-script/nvidia_cutlass_dsl/python_packages/",
-    "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia_utility_script/nvidia_cutlass_dsl/python_packages/",
-    "/kaggle/usr/lib/notebooks/*/nvidia_cutlass_dsl/python_packages/",
-    "/kaggle/input/**/nvidia_cutlass_dsl/python_packages/",
-]
-
-cutlass_found = False
-for pattern in cutlass_search_patterns:
-    matches = glob.glob(pattern, recursive=True)
+# Find the utility script directory
+utility_dir = None
+for pattern in [
+    "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia-utility-script",
+    "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia_utility_script",
+    "/kaggle/usr/lib/notebooks/*/nvidia*utility*",
+]:
+    matches = glob.glob(pattern)
     if matches:
-        site.addsitedir(matches[0])
-        print(f"Added CUTLASS path: {matches[0]}")
-        cutlass_found = True
+        utility_dir = matches[0]
         break
 
-if not cutlass_found:
-    print("WARNING: CUTLASS path not found. Mamba layers may not work.")
+if utility_dir:
+    print(f"Found utility script at: {utility_dir}")
+
+    # Step 1: Copy ptxas binaries to /tmp and make executable
+    src_bin_dir = os.path.join(utility_dir, "triton", "backends", "nvidia", "bin")
+    dst_bin_dir = "/tmp/triton_bin"
+    os.makedirs(dst_bin_dir, exist_ok=True)
+    for src_file in glob.glob(os.path.join(src_bin_dir, "ptxas*")):
+        dst_file = os.path.join(dst_bin_dir, os.path.basename(src_file))
+        shutil.copy2(src_file, dst_file)
+        os.chmod(dst_file, 0o755)
+        print(f"Copied and chmod'd: {dst_file}")
+
+    # Step 2: Add CUTLASS packages to Python path
+    site.addsitedir(utility_dir)
+    cutlass_pkg = os.path.join(utility_dir, "nvidia_cutlass_dsl", "python_packages")
+    if os.path.exists(cutlass_pkg):
+        site.addsitedir(cutlass_pkg)
+        print(f"Added CUTLASS path: {cutlass_pkg}")
+
+    # Step 3: Monkey-patch the already-loaded triton knobs to use our executable copies.
+    # The triton knobs descriptor checks obj.__dict__ FIRST (line 76-78 of knobs.py):
+    #   py_val = obj.__dict__.get(self.name, _NOTHING)
+    #   if py_val is _NOTHING: return self.get()  # <-- this hits the read-only binary
+    #   return self.transform(py_val)              # <-- this uses our override
+    # By setting the value directly in __dict__, we bypass the default path lookup.
+    try:
+        import triton.knobs as triton_knobs
+        nvidia_ns = triton_knobs.nvidia
+        # Set ptxas paths directly on the namespace object's __dict__
+        nvidia_ns.__dict__['ptxas'] = os.path.join(dst_bin_dir, "ptxas")
+        nvidia_ns.__dict__['ptxas_blackwell'] = os.path.join(dst_bin_dir, "ptxas-blackwell")
+        print(f"Patched triton knobs: ptxas -> {dst_bin_dir}/ptxas")
+        print(f"Patched triton knobs: ptxas_blackwell -> {dst_bin_dir}/ptxas-blackwell")
+    except Exception as e:
+        print(f"WARNING: Could not patch triton knobs: {e}")
+        # Fallback: set env vars
+        os.environ['TRITON_PTXAS_PATH'] = os.path.join(dst_bin_dir, "ptxas")
+
+    print("Environment setup complete.")
+else:
+    print("WARNING: nvidia utility script not found.")
 
 # ============================================================
 # CELL 4: Load Model and Tokenizer
@@ -141,11 +175,11 @@ if tokenizer.pad_token is None:
 print("Loading model...")
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_PATH,
-    device_map="auto",
+    device_map={"": 0},
     trust_remote_code=True,
     torch_dtype=torch.bfloat16,
 )
-print(f"Model loaded. Device map: {model.hf_device_map if hasattr(model, 'hf_device_map') else 'N/A'}")
+print(f"Model loaded on cuda:0")
 
 # ============================================================
 # CELL 5: Apply LoRA Adapter
@@ -163,8 +197,9 @@ lora_config = LoraConfig(
 model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 
-# Enable gradient checkpointing to save memory
-model.gradient_checkpointing_enable()
+# NOTE: Gradient checkpointing is incompatible with Mamba layers (they save
+# different tensor counts during forward vs recomputation). Disabled.
+# If OOM occurs, reduce BATCH_SIZE or MAX_SEQ_LENGTH instead.
 model.enable_input_require_grads()
 
 # ============================================================
