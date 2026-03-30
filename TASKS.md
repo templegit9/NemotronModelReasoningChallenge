@@ -20,14 +20,14 @@
 | 5 | ~~Run chat template investigation on Kaggle~~ | YOU | DONE | — | Template uses `<\|im_start\|>/<\|im_end\|>`, `<think>/<​/think>` tags, empty system msg |
 | 6 | **Submit untrained baseline adapter** | YOU | NEXT | — | Fork starter notebook, run as-is, submit for baseline score |
 | 7 | ~~Format training data with CoT reasoning~~ | CLAUDE | DONE | #5 | 8,553 train + 947 val formatted as JSONL with CoT |
-| 8 | Build Kaggle training notebook | CLAUDE | **NEXT** | #7 | LoRA fine-tuning notebook with formatted data |
+| 8 | ~~Build Kaggle training notebook~~ | CLAUDE | DONE | #7 | notebooks/train_submission.py — LoRA fine-tuning with CoT data |
 | 9 | **Run first trained submission on Kaggle** | YOU | BLOCKED | #8, #14 | Upload training notebook, run, submit, share score |
 | 14 | **Verify identity on Kaggle for submission** | YOU | NEXT | — | Required by competition — do ASAP |
 
 ## Phase 3: Autoresearch Integration
 | # | Task | Owner | Status | Blocked By | Notes |
 |---|------|-------|--------|------------|-------|
-| 10 | Set up autoresearch loop (local proxy model) | CLAUDE | BLOCKED | #7 | program.md, train.py, evaluate.py for RTX 5070 Ti |
+| 10 | Set up autoresearch loop (local proxy model) | CLAUDE | **NEXT** | #7 | program.md, train.py, evaluate.py for RTX 5070 Ti |
 | 11 | **Run autoresearch overnight experiments** | YOU | BLOCKED | #10 | Launch locally, ~12 experiments/hour, review next morning |
 
 ## Phase 4: Advanced Optimization
@@ -41,7 +41,8 @@
 ## Current Priority
 1. **Task #14** [YOU] — Verify your identity on Kaggle (required before any submission)
 2. **Task #6** [YOU] — Submit untrained baseline adapter on Kaggle
-3. **Task #8** [CLAUDE] — Building the Kaggle training notebook (NEXT)
+3. **Task #9** [YOU] — Run `notebooks/train_submission.py` on Kaggle and submit (needs #14 done first)
+4. **Task #10** [CLAUDE] — Set up autoresearch loop with local proxy model (NEXT)
 
 ---
 
