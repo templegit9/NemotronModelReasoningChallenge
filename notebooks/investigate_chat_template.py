@@ -1,23 +1,53 @@
 """
 Kaggle notebook: Investigate the Nemotron-3-Nano chat template.
-Run this on Kaggle with GPU to understand the exact prompt format.
-Copy-paste this into a Kaggle notebook cell.
+
+SETUP BEFORE RUNNING:
+1. Click "Add Model" on the right sidebar
+2. Search: nemotron-3-nano-30b-a3b-bf16
+3. Add the model by "metric" (metric/nemotron-3-nano-30b-a3b-bf16)
+4. Turn OFF internet (the competition requires it off)
+5. Select GPU accelerator
+6. Run this cell
 """
 
 # ============================================================
-# CELL 1: Load tokenizer and inspect chat template
+# CELL 1: Find the model path and load tokenizer
 # ============================================================
 
-import kagglehub
-from transformers import AutoTokenizer
+import os
+import glob
 
-MODEL_PATH = kagglehub.model_download(
-    "metric/nemotron-3-nano-30b-a3b-bf16/transformers/default"
-)
+# The model will be under /kaggle/input/ when added as a data source
+possible_paths = glob.glob("/kaggle/input/*nemotron*", recursive=False)
+print("Found model paths:", possible_paths)
+
+# Find the actual model directory (contains config.json)
+MODEL_PATH = None
+for p in possible_paths:
+    for root, dirs, files in os.walk(p):
+        if "config.json" in files and "tokenizer_config.json" in files:
+            MODEL_PATH = root
+            break
+    if MODEL_PATH:
+        break
+
+if not MODEL_PATH:
+    # Try common kaggle model paths
+    search = glob.glob("/kaggle/input/**/config.json", recursive=True)
+    print("All config.json found:", search)
+    if search:
+        MODEL_PATH = os.path.dirname(search[0])
+
+print(f"\nUsing MODEL_PATH: {MODEL_PATH}")
+print(f"Contents: {os.listdir(MODEL_PATH)[:20]}")
+
+# ============================================================
+
+from transformers import AutoTokenizer
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
-print("=" * 60)
+print("\n" + "=" * 60)
 print("CHAT TEMPLATE:")
 print("=" * 60)
 print(tokenizer.chat_template)
@@ -99,10 +129,11 @@ print("=" * 60)
 print(f"BOS: {tokenizer.bos_token!r} (id={tokenizer.bos_token_id})")
 print(f"EOS: {tokenizer.eos_token!r} (id={tokenizer.eos_token_id})")
 print(f"PAD: {tokenizer.pad_token!r} (id={getattr(tokenizer, 'pad_token_id', None)})")
+print(f"All special tokens: {tokenizer.all_special_tokens}")
 
 # Check for thinking-related tokens
-for name in ['think', 'thinking', 'thought']:
-    matches = [t for t in tokenizer.get_vocab() if name in t.lower()]
+for name in ['think', 'Think', 'thought', 'Thought']:
+    matches = [t for t in tokenizer.get_vocab() if name in t]
     if matches:
         print(f"\nTokens containing '{name}': {matches[:10]}")
 
@@ -117,4 +148,4 @@ print(f"Max model context: 4096, Max generation: 3584")
 print(f"Available for prompt: {4096 - 3584} = 512 tokens")
 print(f"{'=' * 60}")
 
-print("\nDONE - Copy the outputs above and share them back.")
+print("\nDONE - Copy ALL output above and share it back.")

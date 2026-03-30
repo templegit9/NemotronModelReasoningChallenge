@@ -17,10 +17,10 @@
 ## Phase 2: Kaggle Pipeline Setup
 | # | Task | Owner | Status | Blocked By | Notes |
 |---|------|-------|--------|------------|-------|
-| 5 | **Run chat template investigation on Kaggle** | YOU | NEXT | — | Paste investigate_chat_template.py into Kaggle notebook with GPU, share output |
+| 5 | ~~Run chat template investigation on Kaggle~~ | YOU | DONE | — | Template uses `<\|im_start\|>/<\|im_end\|>`, `<think>/<​/think>` tags, empty system msg |
 | 6 | **Submit untrained baseline adapter** | YOU | NEXT | — | Fork starter notebook, run as-is, submit for baseline score |
-| 7 | Format training data with CoT reasoning | CLAUDE | BLOCKED | #5 | Needs chat template format to build train_formatted.jsonl |
-| 8 | Build Kaggle training notebook | CLAUDE | BLOCKED | #7 | LoRA fine-tuning notebook with formatted data |
+| 7 | ~~Format training data with CoT reasoning~~ | CLAUDE | DONE | #5 | 8,553 train + 947 val formatted as JSONL with CoT |
+| 8 | Build Kaggle training notebook | CLAUDE | **NEXT** | #7 | LoRA fine-tuning notebook with formatted data |
 | 9 | **Run first trained submission on Kaggle** | YOU | BLOCKED | #8, #14 | Upload training notebook, run, submit, share score |
 | 14 | **Verify identity on Kaggle for submission** | YOU | NEXT | — | Required by competition — do ASAP |
 
@@ -38,10 +38,10 @@
 
 ---
 
-## Your 3 Immediate Actions (do in parallel)
-1. **Task #14** — Verify your identity on Kaggle (required before any submission)
-2. **Task #5** — Run `notebooks/investigate_chat_template.py` on Kaggle and share output back
-3. **Task #6** — Fork the starter notebook, run as-is, submit for baseline score
+## Current Priority
+1. **Task #14** [YOU] — Verify your identity on Kaggle (required before any submission)
+2. **Task #6** [YOU] — Submit untrained baseline adapter on Kaggle
+3. **Task #8** [CLAUDE] — Building the Kaggle training notebook (NEXT)
 
 ---
 
