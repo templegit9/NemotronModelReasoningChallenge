@@ -26,7 +26,7 @@ from prepare_data import load_train
 # ============================================================
 SEED = 42
 MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
-OUTPUT_DIR = "/tmp/autoresearch_adapter"
+OUTPUT_DIR = os.path.join(os.environ.get("TEMP", "/tmp"), "autoresearch_adapter")
 
 # LoRA config
 LORA_RANK = 32

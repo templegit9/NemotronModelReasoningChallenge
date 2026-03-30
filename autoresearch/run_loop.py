@@ -188,7 +188,8 @@ def run_evaluation():
     """Run evaluate.py and return results."""
     print("  Running evaluation...")
     result = subprocess.run(
-        [sys.executable, EVALUATE_PY, "Qwen/Qwen2.5-3B-Instruct", "/tmp/autoresearch_adapter"],
+        [sys.executable, EVALUATE_PY, "Qwen/Qwen2.5-3B-Instruct",
+         os.path.join(os.environ.get("TEMP", "/tmp"), "autoresearch_adapter")],
         cwd=SCRIPT_DIR,
         capture_output=True,
         text=True,
