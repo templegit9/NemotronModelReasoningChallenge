@@ -10,6 +10,7 @@ import json
 import os
 import random
 import time
+import re
 
 import numpy as np
 import torch
@@ -19,7 +20,13 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from prepare_data import load_train
+# Import the data loading function
+try:
+    from prepare_data import load_train
+except ImportError:
+    print("WARNING: Could not import prepare_data. Make sure prepare_data.py exists.")
+    def load_train():
+        return []
 
 # ============================================================
 # Configuration — MODIFY THESE
@@ -29,17 +36,18 @@ MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 OUTPUT_DIR = os.path.join(os.environ.get("TEMP", "/tmp"), "autoresearch_adapter")
 
 # LoRA config
-LORA_RANK = 32
+LORA_RANK = 16
 LORA_ALPHA = 16
 LORA_DROPOUT = 0.05
-LORA_TARGET_MODULES = ["q_proj", "v_proj", "up_proj", "down_proj"]
+LORA_TARGET_MODULES = ["q_proj", "v_proj"]
 
-# Training config
+# Training config — NUM_EPOCHS must stay 1 (>1 epoch exceeds time limit)
 LEARNING_RATE = 2e-5
 NUM_EPOCHS = 1
-BATCH_SIZE = 2
-GRAD_ACCUM_STEPS = 4
-MAX_SEQ_LENGTH = 1024
+BATCH_SIZE = 1
+GRAD_ACCUM_STEPS = 8
+MAX_SEQ_LENGTH = 512
+MAX_TRAINING_STEPS = 500       # Hard cap: 500 steps × 8 accum × 0.32s ≈ 21 min
 WARMUP_RATIO = 0.05
 WEIGHT_DECAY = 0.01
 
@@ -48,9 +56,19 @@ CATEGORY_WEIGHTS = {
     "NUMBER_SYSTEM": 1.0,
     "UNIT_CONVERSION": 1.0,
     "PHYSICS": 1.0,
-    "TEXT_ENCRYPTION": 1.0,
-    "BIT_MANIPULATION": 1.0,
-    "SYMBOL_TRANSFORM": 1.0,
+    "TEXT_ENCRYPTION": 1.5,
+    "BIT_MANIPULATION": 1.5,
+    "SYMBOL_TRANSFORM": 1.5,
+}
+
+# Category-specific reasoning hints for prompting (Dimension 1)
+CATEGORY_HINTS = {
+    "NUMBER_SYSTEM": "Convert between number systems carefully. Work step-by-step through the conversion process.",
+    "UNIT_CONVERSION": "Identify the source and target units. Apply conversion factors systematically.",
+    "PHYSICS": "Apply physics principles and formulas. Show all intermediate calculations.",
+    "TEXT_ENCRYPTION": "Identify the cipher type (shift, substitution, etc.). Apply the decryption pattern consistently.",
+    "BIT_MANIPULATION": "Think in binary. Apply bitwise operations (AND, OR, XOR, shifts) step-by-step.",
+    "SYMBOL_TRANSFORM": "Map each symbol to its corresponding value. Apply the transformation rule consistently.",
 }
 
 # ============================================================
@@ -66,44 +84,96 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 # ============================================================
+# Data filtering and validation
+# ============================================================
+def has_boxed_answer(text):
+    """Check if text contains a \\boxed{...} answer."""
+    return r'\boxed{' in text
+
+
+def filter_valid_examples(examples):
+    """Filter examples to only those with clear \\boxed{} answers."""
+    valid = []
+    for ex in examples:
+        # Check if assistant message has a boxed answer
+        messages = ex.get('messages', [])
+        if len(messages) >= 2:
+            assistant_msg = messages[-1].get('content', '')
+            if has_boxed_answer(assistant_msg):
+                valid.append(ex)
+    print(f"Filtered: {len(examples)} -> {len(valid)} valid examples (with \\boxed{{}} answers)")
+    return valid
+
+
+def inject_category_hints(examples):
+    """Inject category-specific reasoning hints into the system prompt."""
+    for ex in examples:
+        messages = ex.get('messages', [])
+        category = ex.get('category', 'UNKNOWN')
+        hint = CATEGORY_HINTS.get(category, "Solve this puzzle step-by-step.")
+        
+        base_system = f"""You are an expert reasoning assistant. {hint}
+After your reasoning, provide your final answer in the format: \\boxed{{answer}}
+Think carefully and show all work."""
+        
+        # Check if first message is a system message
+        if messages and messages[0].get('role') == 'system':
+            messages[0]['content'] = base_system
+        else:
+            messages.insert(0, {'role': 'system', 'content': base_system})
+    
+    return examples
+
+
+# ============================================================
 # Dataset
 # ============================================================
 class ReasoningDataset(Dataset):
     def __init__(self, examples, tokenizer, max_length):
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.examples = examples
+        # Pre-tokenize all examples upfront to avoid per-batch tokenization overhead.
+        # On-the-fly tokenization (~2s/sample × 8000+ samples = 4+ hours) exceeds the
+        # 30-minute training budget. Pre-tokenization completes in ~2-3 minutes.
+        print(f"Pre-tokenizing {len(examples)} examples...")
+        self.data = []
+        for example in examples:
+            try:
+                messages = example['messages']
+                full_text = tokenizer.apply_chat_template(messages, tokenize=False)
+                full_tokens = tokenizer(
+                    full_text, truncation=True, max_length=max_length, return_tensors="pt"
+                )
+                input_ids = full_tokens["input_ids"].squeeze(0)
+                attention_mask = full_tokens["attention_mask"].squeeze(0)
+                labels = input_ids.clone()
+                
+                # Compute prompt length (system + user, before assistant starts)
+                prompt_messages = [m for m in messages if m['role'] != 'assistant']
+                if prompt_messages:
+                    prompt_text = tokenizer.apply_chat_template(
+                        prompt_messages + [{"role": "assistant", "content": ""}],
+                        tokenize=False,
+                        add_generation_prompt=True
+                    )
+                else:
+                    prompt_text = ""
+                
+                prompt_len = len(tokenizer(prompt_text, truncation=True, max_length=max_length)["input_ids"])
+                labels[:prompt_len] = -100
+                
+                # Only add if there are actual labels to train on (not all -100)
+                if (labels != -100).any():
+                    self.data.append({"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels})
+            except Exception as e:
+                print(f"Skipping example due to error: {e}")
+                continue
+        
+        print(f"Pre-tokenization complete. Valid examples: {len(self.data)}")
 
     def __len__(self):
-        return len(self.examples)
+        return len(self.data)
 
     def __getitem__(self, idx):
-        example = self.examples[idx]
-        messages = example['messages']
-
-        # Tokenize full conversation
-        full_text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False,
-        )
-        full_tokens = self.tokenizer(
-            full_text, truncation=True, max_length=self.max_length,
-            return_tensors="pt",
-        )
-        input_ids = full_tokens["input_ids"].squeeze(0)
-        attention_mask = full_tokens["attention_mask"].squeeze(0)
-
-        # Create labels: mask everything before assistant response
-        labels = input_ids.clone()
-        non_assistant_text = self.tokenizer.apply_chat_template(
-            messages[:2], tokenize=False, add_generation_prompt=True,
-        )
-        non_assistant_tokens = self.tokenizer(
-            non_assistant_text, truncation=True, max_length=self.max_length,
-        )
-        prompt_length = len(non_assistant_tokens["input_ids"])
-        labels[:prompt_length] = -100
-
-        return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+        return self.data[idx]
 
 
 def collate_fn(batch, pad_token_id):
@@ -125,7 +195,7 @@ def apply_category_weights(examples, weights):
     """Resample examples according to category weights."""
     weighted = []
     for ex in examples:
-        cat = ex['category']
+        cat = ex.get('category', 'UNKNOWN')
         w = weights.get(cat, 1.0)
         # Repeat proportionally (floor + probabilistic for fractional)
         repeats = int(w)
@@ -144,8 +214,21 @@ def main():
 
     # Load data
     train_data = load_train()
+    if not train_data:
+        print("ERROR: No training data loaded. Check prepare_data.py")
+        return {"loss": float('inf'), "time_minutes": 0}
+    
+    print(f"Raw training examples: {len(train_data)}")
+    
+    # Filter examples with valid \\boxed{{}} answers
+    train_data = filter_valid_examples(train_data)
+    
+    # Inject category-specific reasoning hints into system prompt (Dimension 1)
+    train_data = inject_category_hints(train_data)
+    
+    # Apply category weights (oversample hard categories)
     train_data = apply_category_weights(train_data, CATEGORY_WEIGHTS)
-    print(f"Training examples (after weighting): {len(train_data)}")
+    print(f"Training examples (after filtering and weighting): {len(train_data)}")
 
     # Load model
     print(f"Loading {MODEL_NAME}...")
@@ -176,10 +259,14 @@ def main():
 
     # Dataset
     dataset = ReasoningDataset(train_data, tokenizer, MAX_SEQ_LENGTH)
+    if len(dataset) == 0:
+        print("ERROR: Dataset is empty after pre-tokenization!")
+        return {"loss": float('inf'), "time_minutes": 0}
+    
     dataloader = DataLoader(
         dataset, batch_size=BATCH_SIZE, shuffle=True,
         collate_fn=lambda b: collate_fn(b, tokenizer.pad_token_id),
-        num_workers=2, pin_memory=True,
+        num_workers=0, pin_memory=False,
     )
     print(f"DataLoader: {len(dataloader)} batches per epoch")
 
@@ -215,6 +302,10 @@ def main():
                 scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1
+
+                if global_step >= MAX_TRAINING_STEPS:
+                    print(f"Reached MAX_TRAINING_STEPS={MAX_TRAINING_STEPS}, stopping early.")
+                    break
 
                 if global_step <= warmup_steps:
                     warmup_lr = LEARNING_RATE * (global_step / max(warmup_steps, 1))

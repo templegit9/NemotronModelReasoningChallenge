@@ -170,7 +170,8 @@ if __name__ == "__main__":
 
     model_name = sys.argv[1] if len(sys.argv) > 1 else "Qwen/Qwen2.5-3B-Instruct"
     adapter_path = sys.argv[2] if len(sys.argv) > 2 else None
+    max_new_tokens = int(sys.argv[3]) if len(sys.argv) > 3 else 512
 
     val_data = load_val()
-    results = evaluate_adapter(model_name, adapter_path, val_data)
+    results = evaluate_adapter(model_name, adapter_path, val_data, max_new_tokens=max_new_tokens)
     print(f"\nDone. Overall: {results['overall_accuracy']:.4f}")

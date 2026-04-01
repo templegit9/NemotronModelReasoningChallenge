@@ -1,0 +1,15 @@
+exp	timestamp	description	overall_acc	NUMBER_SYSTEM	UNIT_CONVERSION	PHYSICS	TEXT_ENCRYPTION	BIT_MANIPULATION	SYMBOL_TRANSFORM	train_loss	train_time_min	status
+1	2026-03-31 16:13	Experiment 1: Aggressive oversample hard categories + category hints in system prompt	N/A	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	0.8920	34.6	EVAL_FAILED
+2	2026-03-31 16:19	Looking at the results, experiment 1 failed completely (all zeros across all categories) despite tra	N/A	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	N/A	N/A	TRAIN_FAILED
+3	2026-03-31 16:20	Looking at the failed experiments, the issue is clear: **the evaluation is completely broken** (all 	N/A	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	N/A	N/A	TRAIN_FAILED
+4	2026-03-31 16:21	Looking at the failed experiments, all three show **all zeros across all categories** with either `E	N/A	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	N/A	N/A	TRAIN_FAILED
+5	2026-03-31 17:06	Looking at the failed experiments, I see the core issue: **all evaluations returned all zeros**, sug	N/A	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	N/A	N/A	TRAIN_FAILED
+6	2026-03-31 18:53	**Fix**: Add a **strict output format constraint** to the system prompt, and modify the messages to 	N/A	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	0.7851	28.0	EVAL_FAILED
+7	2026-03-31 20:32	This targets dimension 1 (prompting) + dimension 3 (synthetic) + dimension 4 (loss weighting)	N/A	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	0.7303	20.8	EVAL_FAILED
+8	2026-03-31 20:33	Additionally, I'll make a small data-side improvement: filter out examples where the reasoning is su	N/A	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	N/A	N/A	TRAIN_FAILED
+9	2026-03-31 22:45	**Key change**: Modify the system prompt to force answers in a dead-simple format (`ANSWER: <single_token>`), and ensure training examples have crysta	N/A	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	0.7303	19.5	EVAL_FAILED
+10	2026-03-31 23:00	ERROR: 'charmap' codec can't encode characters in position 24-32: character maps to <un	N/A	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	N/A	N/A	ERROR
+11	2026-04-01 00:10	- Keep the CoT reasoning in the middle, but enforce final answer format	0.1848	0.8089	0.2956	0.0000	0.0000	0.0063	0.0000	0.6756	41.1	OK
+12	2026-04-01 00:10	The hypothesis: hard categories need both (1) much more training signal and (2) explicit reasoning guidance in the system prompt to even begin learnin	N/A	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	N/A	N/A	TRAIN_FAILED
+13	2026-04-01 00:11	**Change (Dimension 1 — Prompting)**: Add **category-specific reasoning hints** to the system prompt that guide the model's internal reasoning process	N/A	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	N/A	N/A	TRAIN_FAILED
+14	2026-04-01 00:11	- Mask loss on padding and low-information tokens, focus on final answer	N/A	0.0000	0.0000	0.0000	0.0000	0.0000	0.0000	N/A	N/A	TRAIN_FAILED

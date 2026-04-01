@@ -1,73 +1,84 @@
 # Research Program: Nemotron Reasoning Challenge
 
 ## Objective
-Maximize accuracy on 6 types of "Alice's Wonderland" reasoning puzzles by finding the best LoRA fine-tuning configuration. We train a proxy model (Qwen2.5-3B) locally for fast iteration, then transfer the best configuration to the real Nemotron model on Kaggle.
+Maximize accuracy on 6 "Alice's Wonderland" reasoning puzzle categories.
+We fine-tune Qwen2.5-3B locally as a proxy, then transfer findings to the Nemotron submission.
 
 ## Metric
-- **Primary**: Overall validation accuracy (correct answers / total)
-- **Secondary**: Per-category accuracy breakdown (6 categories)
+- **Primary**: Overall validation accuracy (correct / total)
 - **Categories**: NUMBER_SYSTEM, UNIT_CONVERSION, PHYSICS, TEXT_ENCRYPTION, BIT_MANIPULATION, SYMBOL_TRANSFORM
+- **Leaderboard top**: 0.82 (82%) — that is our target
 
-## Current Best
-- Check `results.tsv` for the best experiment so far
-- Leaderboard top score: 0.82 (82%)
+## 6 Experiment Dimensions (from the official challenge)
 
-## What You Can Modify
-You may ONLY modify `train.py`. Changes you can make:
+### 1. Prompting Strategies
+Modify how training examples are formatted in the dataset:
+- Change the system prompt (add reasoning instructions, role descriptions)
+- Reformat the CoT reasoning: step-by-step numbered, bullet points, or brief
+- Add category-specific instructions (e.g. "Think in binary for BIT_MANIPULATION")
+- Add few-shot examples in the system prompt
+- Enforce output format (e.g. "Answer: X" on the last line)
 
-### 1. Chain-of-Thought Format
-- Reasoning style (step-by-step, brief, detailed)
-- Whether to include CoT for easy vs hard categories
-- Think tag format and content
+### 2. Data Filtering and Curation
+Control which examples get trained on:
+- Filter out examples where the reasoning is very short (low quality)
+- Filter by sequence length (skip examples that get heavily truncated)
+- Oversample hard categories (BIT_MANIPULATION, SYMBOL_TRANSFORM, TEXT_ENCRYPTION)
+- Undersample easy categories if they dominate training
+- Filter examples where prompt_length >= token_count (all-masked labels → NaN)
 
-### 2. Training Data Mix
-- Category sampling weights (oversample hard categories?)
-- Data filtering (remove low-quality CoT examples?)
-- Sequence length limits
+### 3. Synthetic Data Generation
+Augment training data at runtime within train.py:
+- Duplicate hard-category examples with paraphrased system prompts
+- Create reversed examples (answer → question) for harder categories
+- Apply text augmentation to existing examples (synonym replacement in reasoning)
 
-### 3. Hyperparameters
-- Learning rate (try: 1e-5 to 5e-4)
-- Number of epochs (try: 1-5)
-- Batch size / gradient accumulation
-- LoRA rank (try: 8, 16, 32)
-- LoRA alpha (try: 16, 32, 64)
-- LoRA dropout (try: 0, 0.05, 0.1)
-- LoRA target modules (add gate_proj, q_proj, k_proj, v_proj?)
-- Weight decay
-- Warmup ratio
-- Max sequence length (try: 512, 1024, 2048)
+### 4. Reinforcement Learning / Alternative Objectives
+Replace or augment the standard cross-entropy loss:
+- Upweight loss on the final answer token (encourage correct answer)
+- Upweight loss on reasoning steps vs. padding
+- Ignore loss on trivially correct steps, focus on hard transitions
+- Apply label smoothing to avoid overconfidence
 
-### 4. Training Techniques
-- Loss weighting per category
-- Curriculum learning (easy first, hard later)
-- Different optimizers (AdamW, SGD, Adafactor)
-- Learning rate schedules (cosine, linear, constant)
+### 5. Lightweight Fine-tuning (LoRA Hyperparameters)
+The baseline approach — still important to optimize:
+- LoRA rank: 8, 16, 32 (higher = more capacity, slower)
+- LoRA alpha: 16, 32, 64 (scaling factor, often set = rank or 2× rank)
+- LoRA dropout: 0, 0.05, 0.1 (regularization)
+- Target modules: q_proj only, q+v, q+k+v, all attention + MLP (gate_proj, up_proj)
+- Learning rate: 1e-5 to 1e-4
+- Warmup ratio: 0.03 to 0.1
+- Optimizer: AdamW, Adafactor
 
-## What You CANNOT Modify
-- `evaluate.py` (evaluation logic is fixed)
-- `prepare_data.py` (data loading is fixed)
-- The proxy model choice (Qwen2.5-3B)
-- The validation split
+### 6. Other Approaches
+- Curriculum learning: train easy categories first, hard ones later
+- Loss masking: only compute loss on the final answer, not the full chain
+- Different CoT length targets per category (short for easy, long for hard)
 
-## Constraints
-- Each experiment must complete within 15 minutes on RTX 5070 Ti (16GB VRAM)
-- Do not exceed 14GB VRAM usage
-- The adapter must use LoRA (no full fine-tuning)
-- LoRA rank must be <= 32 (competition constraint)
+## Hard Constraints (DO NOT VIOLATE)
+- `BATCH_SIZE = 1` — 16GB VRAM limit, never increase
+- `NUM_EPOCHS = 1` — more epochs exceed time limit
+- `MAX_SEQ_LENGTH = 512` — lower values truncate assistant tokens → NaN loss
+- `MAX_TRAINING_STEPS = 300–600` — keeps training within 45-min timeout
+- `LORA_RANK <= 32` — competition constraint
+- Only import: standard library, torch, transformers, peft, numpy
+- `prepare_data` import must stay unchanged
+- Pre-tokenize ALL data in `ReasoningDataset.__init__`, not in `__getitem__`
 
-## Strategy Tips
-- Start with small changes, measure impact
-- The 6 categories have different difficulty levels:
-  - Easy (solvable algorithmically): NUMBER_SYSTEM, UNIT_CONVERSION, PHYSICS
-  - Medium: TEXT_ENCRYPTION
-  - Hard: BIT_MANIPULATION, SYMBOL_TRANSFORM
-- Changes that improve hard categories are most valuable
-- The real model (Nemotron) has Mamba+Transformer hybrid architecture; Qwen is pure Transformer. Data/format changes transfer better than architecture-specific hyperparams.
-- Test one hypothesis at a time for clear signal
+## Strategy
+- Hard categories (BIT_MANIPULATION, SYMBOL_TRANSFORM) score near 0 — biggest opportunity
+- Prompting and data-mix changes transfer better to Nemotron than hyperparams
+- Make ONE focused change per experiment — clear signal
+- If a category is at 0%, try: (1) oversample it 1.5×, (2) add category hint to system prompt
+- CATEGORY_WEIGHTS max value is 1.5 — higher values cause tokenisation to exceed the 45-min timeout
+- Check `results.tsv` for the best run so far and build on it
 
-## Results Format
-After each experiment, report:
-- Overall accuracy
-- Per-category accuracy
-- What you changed and why
-- Whether to keep or discard
+## Infrastructure Notes (READ CAREFULLY before interpreting results)
+- ALL past EVAL_FAILEDs were caused by evaluation timing out — NOT a broken eval script and NOT a problem with model output format. The evaluation script works correctly. The timeout was caused by generating too many tokens per example (512 → now fixed at 128 max_new_tokens).
+- DO NOT change output formats, answer formats, or add "ANSWER:" prefixes to fix EVAL_FAILED. The eval script uses `\boxed{}` and fallback parsing that already works — changing the format may break it.
+- Experiments showing TRAIN_FAILED mean the train.py you wrote had a code error — check that you kept `model.enable_input_require_grads()` after `get_peft_model()`, did not use `torch.no_grad()` in the training loop, and did not detach the loss tensor.
+- The baseline model (no modifications) trains successfully with loss ~0.9 in ~35 min.
+- When you see failures, DO NOT make drastic rewrites. Make ONE small targeted change.
+- If the last experiment was TRAIN_FAILED, try a simpler or different approach — do not repeat the same change.
+- NEVER remove `model.enable_input_require_grads()` — removing it causes `RuntimeError: element 0 of tensors does not require grad`.
+- NEVER add custom answer format tokens like "ANSWER:" or change the extract_answer logic — this breaks the evaluator.
