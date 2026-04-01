@@ -73,6 +73,39 @@ The baseline approach — still important to optimize:
 - CATEGORY_WEIGHTS max value is 1.5 — higher values cause tokenisation to exceed the 45-min timeout
 - Check `results.tsv` for the best run so far and build on it
 
+## Learned Findings (READ BEFORE PROPOSING ANY CHANGE)
+
+### What works
+- **Exp 18 is the best result (20.80% overall)** — use it as the base for all future experiments
+- **Simple reasoning starters prepended to assistant messages** for hard categories is the proven winning technique:
+  ```python
+  REASONING_STARTERS = {
+      "TEXT_ENCRYPTION": "I need to analyze the encryption pattern and decode step by step.",
+      "BIT_MANIPULATION": "Let me think about the bit operations in binary representation.",
+      "SYMBOL_TRANSFORM": "I will trace through the symbol transformation rules carefully.",
+  }
+  ```
+  Inject via: `inject_reasoning_starter(example)` that prepends starter to assistant message content BEFORE tokenization.
+- **LORA_RANK=16** outperforms LORA_RANK=32 — more capacity without guidance dilutes learning
+- **Category oversampling at 1.5×** for hard categories helps (keep this in all experiments)
+
+### What fails — DO NOT repeat these
+- **Any tensor manipulation** (loss masking, loss scaling, gradient weighting) → always TRAIN_FAILED
+- **Modifying the chat template or system prompt per-category at template level** → TRAIN_FAILED
+- **Multiple simultaneous changes** (few-shot + augmentation + prompting together) → TRAIN_FAILED
+- **Structured reasoning frameworks / multi-step markers injected into content** → TRAIN_FAILED
+- **Reverting to baseline without reasoning starters** → drops to 12-13% (confirmed exp 17)
+
+### Pattern warning
+After a successful experiment, DO NOT immediately try something complex. The pattern of success → complex attempt → TRAIN_FAILED has repeated 3 times. After any OK result, make the **smallest possible next step** building on what worked.
+
+### Recommended next experiments (in priority order)
+1. **Tune LEARNING_RATE** on exp 18's base: try 5e-5 (currently 2e-5) — safe, one number change
+2. **Expand LORA_TARGET_MODULES**: add `k_proj` to `["q_proj", "v_proj"]` — more parameters, no data touching
+3. **Stronger/more specific reasoning starters** for hard categories — refine the starter text, keep same code structure
+4. **Try LORA_ALPHA=32** (currently 16, often best at 2× rank) — one number change
+5. Only after the above are exhausted: carefully try simple data filtering (remove examples shorter than 50 tokens)
+
 ## Infrastructure Notes (READ CAREFULLY before interpreting results)
 - ALL past EVAL_FAILEDs were caused by evaluation timing out — NOT a broken eval script and NOT a problem with model output format. The evaluation script works correctly. The timeout was caused by generating too many tokens per example (512 → now fixed at 128 max_new_tokens).
 - DO NOT change output formats, answer formats, or add "ANSWER:" prefixes to fix EVAL_FAILED. The eval script uses `\boxed{}` and fallback parsing that already works — changing the format may break it.

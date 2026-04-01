@@ -430,6 +430,16 @@ def main():
                 print(f"  Tokens — in: {usage.input_tokens}, out: {usage.output_tokens} | cost: ${usage.cost:.4f}")
                 print(f"  Cumulative — in: {total_input_tokens}, out: {total_output_tokens} | total cost: ${total_cost:.4f}")
 
+                # Syntax-check before writing — catches 80% of agent errors instantly
+                try:
+                    compile(new_code, "train.py", "exec")
+                except SyntaxError as e:
+                    print(f"  SYNTAX ERROR in agent code: {e} — skipping, restoring previous train.py")
+                    append_result(exp_num, description, None, {}, None, None, "TRAIN_FAILED")
+                    write_status("idle", exp_num, description, max_experiments=args.max_experiments,
+                                 started_at=run_started_at, exp_started_at=exp_started_at)
+                    continue
+
                 write_file(TRAIN_PY, new_code)
 
                 write_status("training", exp_num, description, plan=plan, max_experiments=args.max_experiments,
