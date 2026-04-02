@@ -99,12 +99,23 @@ The baseline approach — still important to optimize:
 ### Pattern warning
 After a successful experiment, DO NOT immediately try something complex. The pattern of success → complex attempt → TRAIN_FAILED has repeated 3 times. After any OK result, make the **smallest possible next step** building on what worked.
 
+### Current confirmed baseline state (after exp 25 restores)
+The train.py you are working with should have:
+- `LORA_RANK = 16` (if not, set it to 16)
+- `LORA_ALPHA = 16` (if not, set it to 16)
+- `LEARNING_RATE = 2e-5`
+- `LORA_TARGET_MODULES = ["q_proj", "v_proj"]`
+- REASONING_STARTERS dict with inject_reasoning_starter() function PRESENT
+- CATEGORY_WEIGHTS with 1.5× for hard categories
+
+Before proposing any change, READ the current values in train.py and confirm this state. If any of these are wrong, first restore them before adding your change.
+
 ### Recommended next experiments (in priority order)
-1. **Tune LEARNING_RATE** on exp 18's base: try 5e-5 (currently 2e-5) — safe, one number change
-2. **Expand LORA_TARGET_MODULES**: add `k_proj` to `["q_proj", "v_proj"]` — more parameters, no data touching
-3. **Stronger/more specific reasoning starters** for hard categories — refine the starter text, keep same code structure
-4. **Try LORA_ALPHA=32** (currently 16, often best at 2× rank) — one number change
-5. Only after the above are exhausted: carefully try simple data filtering (remove examples shorter than 50 tokens)
+1. **Tune LEARNING_RATE**: try 5e-5 — one number change to `LEARNING_RATE = 5e-5`
+2. **Expand LORA_TARGET_MODULES**: add `k_proj` — change to `["q_proj", "v_proj", "k_proj"]`
+3. **Try LORA_ALPHA=32** — one number change to `LORA_ALPHA = 32` (2× rank is often optimal)
+4. **Refine reasoning starters**: make them more specific (e.g. for BIT_MANIPULATION: "Let me convert each value to binary and apply the bitwise operation step by step.") — change only the string text
+5. Only after the above are exhausted: simple data filtering (skip examples with assistant content shorter than 50 tokens)
 
 ## Infrastructure Notes (READ CAREFULLY before interpreting results)
 - ALL past EVAL_FAILEDs were caused by evaluation timing out — NOT a broken eval script and NOT a problem with model output format. The evaluation script works correctly. The timeout was caused by generating too many tokens per example (512 → now fixed at 128 max_new_tokens).
