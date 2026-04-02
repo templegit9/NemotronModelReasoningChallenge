@@ -59,7 +59,8 @@ The baseline approach — still important to optimize:
 - `BATCH_SIZE = 1` — 16GB VRAM limit, never increase
 - `NUM_EPOCHS = 1` — more epochs exceed time limit
 - `MAX_SEQ_LENGTH = 512` — lower values truncate assistant tokens → NaN loss
-- `MAX_TRAINING_STEPS = 300–600` — keeps training within 45-min timeout
+- `MAX_TRAINING_STEPS = 400` — confirmed safe with REASONING_STARTERS; 500 causes timeout
+- `MAX_TRAINING_STEPS = 300–400` — keeps training within 45-min timeout. Use 400, NOT 500 — confirmed that 500 causes timeout with REASONING_STARTERS enabled
 - `LORA_RANK <= 32` — competition constraint
 - Only import: standard library, torch, transformers, peft, numpy
 - `prepare_data` import must stay unchanged
@@ -103,7 +104,8 @@ After a successful experiment, DO NOT immediately try something complex. The pat
 The train.py you are working with should have:
 - `LORA_RANK = 16` (if not, set it to 16)
 - `LORA_ALPHA = 16` (if not, set it to 16)
-- `LEARNING_RATE = 2e-5`
+- `LEARNING_RATE = 2e-5` (or 5e-5 — next experiment to try)
+- `MAX_TRAINING_STEPS = 400` (NOT 500 — causes timeout)
 - `LORA_TARGET_MODULES = ["q_proj", "v_proj"]`
 - REASONING_STARTERS dict with inject_reasoning_starter() function PRESENT
 - CATEGORY_WEIGHTS with 1.5× for hard categories
@@ -120,7 +122,8 @@ Before proposing any change, READ the current values in train.py and confirm thi
 ## Infrastructure Notes (READ CAREFULLY before interpreting results)
 - ALL past EVAL_FAILEDs were caused by evaluation timing out — NOT a broken eval script and NOT a problem with model output format. The evaluation script works correctly. The timeout was caused by generating too many tokens per example (512 → now fixed at 128 max_new_tokens).
 - DO NOT change output formats, answer formats, or add "ANSWER:" prefixes to fix EVAL_FAILED. The eval script uses `\boxed{}` and fallback parsing that already works — changing the format may break it.
-- Experiments showing TRAIN_FAILED mean the train.py you wrote had a code error — check that you kept `model.enable_input_require_grads()` after `get_peft_model()`, did not use `torch.no_grad()` in the training loop, and did not detach the loss tensor.
+- Experiments showing TRAIN_FAILED mean either a code error OR a training timeout (45-min hard limit). Check that you kept `model.enable_input_require_grads()` after `get_peft_model()`, did not use `torch.no_grad()` in the training loop, and did not detach the loss tensor.
+- **TRAINING TIMEOUT WARNING**: Training with REASONING_STARTERS + CATEGORY_WEIGHTS 1.5× takes ~41-46 min. This is dangerously close to the 45-min timeout. `MAX_TRAINING_STEPS` has been reduced to **400** (from 500) to give margin. Do NOT increase it back to 500. Use 400 or lower.
 - The baseline model (no modifications) trains successfully with loss ~0.9 in ~35 min.
 - When you see failures, DO NOT make drastic rewrites. Make ONE small targeted change.
 - If the last experiment was TRAIN_FAILED, try a simpler or different approach — do not repeat the same change.
