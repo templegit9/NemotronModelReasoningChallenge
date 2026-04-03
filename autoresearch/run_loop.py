@@ -28,12 +28,6 @@ import sys
 import time
 import traceback
 
-try:
-    import anthropic
-except ImportError:
-    print("ERROR: anthropic package not installed. Run: pip install anthropic")
-    sys.exit(1)
-
 # Load .env from repo root if present
 _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
 if os.path.exists(_env_path):
@@ -207,7 +201,7 @@ def get_agent_modification(experiment_num, program, results, current_train, last
     code = re.sub(r'BATCH_SIZE\s*=\s*[2-9]\d*', 'BATCH_SIZE = 1', code)
     code = re.sub(r'NUM_EPOCHS\s*=\s*[2-9]\d*', 'NUM_EPOCHS = 1', code)
     code = re.sub(r'MAX_SEQ_LENGTH\s*=\s*\d+[^\n]*',
-                  lambda m: f'MAX_SEQ_LENGTH = {min(int(re.search(r"\\d+", m.group(0)).group()), 2048)}', code)
+                  lambda m: 'MAX_SEQ_LENGTH = ' + str(min(int(re.search(r'\d+', m.group(0)).group()), 2048)), code)
     code = re.sub(
         r'MAX_TRAINING_STEPS\s*=\s*(\d+)',
         lambda m: f'MAX_TRAINING_STEPS = {max(100, min(int(m.group(1)), 200))}',
@@ -480,18 +474,6 @@ def main():
             except KeyboardInterrupt:
                 print("\n\nStopped by user.")
                 break
-            except anthropic.AuthenticationError as e:
-                print(f"\n  FATAL: Claude API authentication failed — check ANTHROPIC_API_KEY ({e})")
-                break
-            except anthropic.RateLimitError as e:
-                print(f"\n  WARNING: Rate limited. Waiting 60s... ({e})")
-                time.sleep(60)
-                continue
-            except anthropic.APIError as e:
-                print(f"\n  API ERROR: {e}")
-                append_result(exp_num, f"API_ERROR: {str(e)[:80]}", None, {}, None, None, "ERROR")
-                time.sleep(10)
-                continue
             except Exception as e:
                 print(f"  ERROR: {e}")
                 traceback.print_exc()
