@@ -34,6 +34,16 @@ except ImportError:
     print("ERROR: anthropic package not installed. Run: pip install anthropic")
     sys.exit(1)
 
+# Load .env from repo root if present
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
+if os.path.exists(_env_path):
+    with open(_env_path, encoding='utf-8') as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith('#') and '=' in _line:
+                _k, _v = _line.split('=', 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
+
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TRAIN_PY = os.path.join(SCRIPT_DIR, "train.py")
@@ -44,7 +54,7 @@ BACKUP_DIR = os.path.join(SCRIPT_DIR, "backups")
 STATUS_JSON = os.path.join(SCRIPT_DIR, "status.json")
 LOCK_FILE = os.path.join(SCRIPT_DIR, "run_loop.lock")
 
-CLAUDE_MODEL = "claude-haiku-4-5-20251001"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -126,99 +136,81 @@ def backup_train_py(experiment_num):
 
 # ── agent ────────────────────────────────────────────────────────────────────
 
-def get_agent_modification(experiment_num, program, results, current_train):
-    """Ask Claude to propose a single modification to train.py."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY environment variable not set. "
-                         "Set it with: set ANTHROPIC_API_KEY=sk-ant-...")
+def get_best_backup():
+    """Return the backup path of the highest-accuracy OK experiment, or None."""
+    if not os.path.exists(RESULTS_TSV):
+        return None
+    best_acc = -1
+    best_exp = None
+    with open(RESULTS_TSV, encoding='utf-8') as f:
+        for row in csv.DictReader(f, delimiter='\t'):
+            if row.get('status') == 'OK':
+                try:
+                    acc = float(row['overall_acc'])
+                    if acc > best_acc:
+                        best_acc = acc
+                        best_exp = int(row['exp'])
+                except (ValueError, KeyError):
+                    pass
+    if best_exp is None:
+        return None
+    path = os.path.join(BACKUP_DIR, f"train_exp{best_exp:03d}.py")
+    return path if os.path.exists(path) else None
 
-    client = anthropic.Anthropic(api_key=api_key)
 
-    # Static system prompt — cached to minimise cost on repeated calls
-    system_prompt = f"""You are an ML research agent running automated experiments to maximise accuracy on the Nemotron Reasoning Challenge.
+AGENT_REQUEST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_request.json")
+AGENT_RESPONSE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_response.json")
+AGENT_POLL_INTERVAL = 5    # seconds between checks for response
+AGENT_TIMEOUT = 7200       # 2 hours max wait for human response (Nemotron experiments are slow)
 
-## Research Program
-{program}
 
-## Hard rules (enforced automatically — never violate):
-- BATCH_SIZE = 1  (16 GB VRAM limit)
-- NUM_EPOCHS = 1  (time limit)
-- MAX_SEQ_LENGTH = 512  (lower values → all labels masked → NaN loss)
-- MAX_TRAINING_STEPS must be 300–500  (keeps training under 40 min)
-- LORA_RANK <= 32
-- Only import: standard library, torch, transformers, peft, numpy
-- Keep `from prepare_data import load_train` unchanged
-- CRITICAL: ReasoningDataset MUST pre-tokenise ALL data in __init__ (NOT __getitem__). On-the-fly tokenisation takes hours and always times out.
+def get_agent_modification(experiment_num, program, results, current_train, last_error=None):
+    """Write a request file and wait for Claude Code (human) to respond with a modification."""
 
-## Response format (strict):
-Line 1: Short description of the change (max 100 chars, no numbering)
-Then the COMPLETE modified train.py wrapped in ```python ... ```"""
+    # Clear any stale response from a previous round
+    if os.path.exists(AGENT_RESPONSE_FILE):
+        os.remove(AGENT_RESPONSE_FILE)
 
-    user_message = f"""## Past experiment results (most recent first)
-{results}
+    request = {
+        "experiment_num": experiment_num,
+        "program": program,
+        "results": results,
+        "current_train": current_train,
+        "last_error": last_error,
+        "requested_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    with open(AGENT_REQUEST_FILE, 'w', encoding='utf-8') as f:
+        json.dump(request, f, indent=2)
 
-## Current train.py
-```python
-{current_train}
-```
+    print(f"  Waiting for Claude Code to respond (request written to agent_request.json)...")
 
-This is experiment #{experiment_num}. Propose ONE focused change from the 6 dimensions:
-1. Prompting strategies — system prompt wording, CoT format, category-specific instructions
-2. Data filtering/curation — oversample hard categories (max 2x), filter poor examples
-3. Synthetic data — augment examples at runtime inside train.py
-4. RL / alternative objectives — upweight final answer token loss, label smoothing
-5. LoRA hyperparameters — rank, alpha, dropout, target modules, learning rate
-6. Other — curriculum learning, loss masking
+    elapsed = 0
+    while elapsed < AGENT_TIMEOUT:
+        time.sleep(AGENT_POLL_INTERVAL)
+        elapsed += AGENT_POLL_INTERVAL
+        if os.path.exists(AGENT_RESPONSE_FILE):
+            with open(AGENT_RESPONSE_FILE, encoding='utf-8') as f:
+                response = json.load(f)
+            os.remove(AGENT_RESPONSE_FILE)
+            os.remove(AGENT_REQUEST_FILE)
+            break
+    else:
+        if os.path.exists(AGENT_REQUEST_FILE):
+            os.remove(AGENT_REQUEST_FILE)
+        raise TimeoutError(f"No response after {AGENT_TIMEOUT}s — Claude Code session may be inactive")
 
-Prioritise dimensions 1–4 (they transfer better to Nemotron than hyperparameter tuning).
-Hard categories scoring near 0%: BIT_MANIPULATION, SYMBOL_TRANSFORM, TEXT_ENCRYPTION — biggest opportunity."""
+    code = response.get("code", "")
+    description = response.get("description", "No description")[:150]
+    plan = response.get("plan", description)
 
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=4096,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
-    )
-
-    text = response.content[0].text
-    usage = response.usage
-
-    input_tokens = usage.input_tokens
-    output_tokens = usage.output_tokens
-    cache_creation = 0
-    cache_read = 0
-
-    # Cost: Haiku input $0.80/MTok, output $4/MTok
-    cost = (
-        (input_tokens / 1e6) * 0.80
-        + (output_tokens / 1e6) * 4.00
-    )
-
-    # Extract python code block first
-    parts = text.split('```python')
-    if len(parts) < 2:
-        raise ValueError("Agent response did not contain a ```python code block")
-    code = parts[1].split('```')[0].strip()
-
-    # Full plan = everything before the code block (for display in dashboard)
-    plan = parts[0].strip()
-
-    # Short description = last non-blank line before the code (one-liner for results.tsv)
-    pre_lines = [l.strip() for l in plan.split('\n') if l.strip()]
-    description = pre_lines[-1] if pre_lines else "No description"
-    description = re.sub(r'^\d+[\.\)]\s*', '', description)
-    description = re.sub(r'\s*\([^)]*chars?\).*$', '', description)
-    description = re.sub(r'^#+\s*', '', description)
-    description = description.strip().rstrip('.')[:150]
-
-    # Enforce hard constraints regardless of what the model wrote
+    # Enforce hard constraints
     code = re.sub(r'BATCH_SIZE\s*=\s*[2-9]\d*', 'BATCH_SIZE = 1', code)
     code = re.sub(r'NUM_EPOCHS\s*=\s*[2-9]\d*', 'NUM_EPOCHS = 1', code)
-    code = re.sub(r'MAX_SEQ_LENGTH\s*=\s*\d+[^\n]*', 'MAX_SEQ_LENGTH = 512', code)
+    code = re.sub(r'MAX_SEQ_LENGTH\s*=\s*\d+[^\n]*',
+                  lambda m: f'MAX_SEQ_LENGTH = {min(int(re.search(r"\\d+", m.group(0)).group()), 2048)}', code)
     code = re.sub(
         r'MAX_TRAINING_STEPS\s*=\s*(\d+)',
-        lambda m: f'MAX_TRAINING_STEPS = {max(300, min(int(m.group(1)), 500))}',
+        lambda m: f'MAX_TRAINING_STEPS = {max(100, min(int(m.group(1)), 200))}',
         code,
     )
     code = re.sub(
@@ -226,27 +218,22 @@ Hard categories scoring near 0%: BIT_MANIPULATION, SYMBOL_TRANSFORM, TEXT_ENCRYP
         lambda m: f'LORA_RANK = {min(int(m.group(1)), 32)}',
         code,
     )
-    # Cap CATEGORY_WEIGHTS values at 1.5 to prevent tokenisation timeout
-    # (2x oversampling of 3 categories = ~12800 examples → 13 min tokenisation alone)
     code = re.sub(
         r'("[\w_]+")\s*:\s*([2-9](?:\.\d+)?|\d+\.\d+)',
         lambda m: f'{m.group(1)}: {min(float(m.group(2)), 1.5)}' if float(m.group(2)) > 1.5 else m.group(0),
         code,
     )
-    # Validate enable_input_require_grads is present — its absence causes gradient errors
     if 'enable_input_require_grads' not in code:
-        raise ValueError("Generated code is missing model.enable_input_require_grads() — rejecting")
+        raise ValueError("Response code is missing model.enable_input_require_grads() — rejecting")
 
     class _Usage:
-        pass
-    u = _Usage()
-    u.input_tokens = input_tokens
-    u.output_tokens = output_tokens
-    u.cache_creation = cache_creation
-    u.cache_read = cache_read
-    u.cost = cost
+        input_tokens = 0
+        output_tokens = 0
+        cache_creation = 0
+        cache_read = 0
+        cost = 0.0
 
-    return description, plan, code, u
+    return description, plan, code, _Usage()
 
 
 # ── subprocess helpers ────────────────────────────────────────────────────────
@@ -264,7 +251,7 @@ def _kill_proc(proc):
 
 
 def run_experiment():
-    """Run train.py and return (train_loss, train_time_minutes) or (None, None)."""
+    """Run train.py and return (train_loss, train_time_minutes, stderr) or (None, None, stderr)."""
     print("  Running training...")
     train_env = os.environ.copy()
     train_env.update({
@@ -284,15 +271,15 @@ def run_experiment():
         env=train_env,
     )
     try:
-        stdout, stderr = proc.communicate(timeout=2700)  # 45 min hard limit
+        stdout, stderr = proc.communicate(timeout=14400)  # 4 hour hard limit (Nemotron on A100)
     except subprocess.TimeoutExpired:
         print("  TRAINING TIMED OUT — killing process...")
         _kill_proc(proc)
-        return None, None
+        return None, None, "Training timed out after 4 hours"
 
     if proc.returncode != 0:
         print(f"  TRAINING FAILED:\n{stderr[-1000:]}")
-        return None, None
+        return None, None, stderr[-1000:]
 
     train_loss = None
     train_time = None
@@ -310,16 +297,17 @@ def run_experiment():
 
     print(f"  Training done. Loss: {train_loss}, Time: {train_time}min")
     print(stdout[-500:])
-    return train_loss, train_time
+    return train_loss, train_time, None
 
 
 def run_evaluation():
     """Run evaluate.py and return (overall_acc, category_accs) or (None, {})."""
     print("  Running evaluation...")
     eval_proc = subprocess.Popen(
-        [sys.executable, EVALUATE_PY, "Qwen/Qwen2.5-3B-Instruct",
-         os.path.join(os.environ.get("TEMP", "/tmp"), "autoresearch_adapter"),
-         "64"],   # max_new_tokens=64: final answers are numbers/binary strings, ~8x faster than 512
+        [sys.executable, EVALUATE_PY,
+         os.environ.get("MODEL_PATH", "/workspace/nemotron"),
+         os.environ.get("ADAPTER_PATH", "/workspace/adapter"),
+         "128"],   # max_new_tokens=128: enough for answers + short reasoning; 512 causes timeout
         cwd=SCRIPT_DIR,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -328,7 +316,7 @@ def run_evaluation():
         errors='replace',
     )
     try:
-        eval_stdout, eval_stderr = eval_proc.communicate(timeout=3600)  # 60 min — 947 examples × ~2s each
+        eval_stdout, eval_stderr = eval_proc.communicate(timeout=7200)  # 2 hours — 947 examples on 30B Nemotron
     except subprocess.TimeoutExpired:
         print("  EVALUATION TIMED OUT — killing process...")
         _kill_proc(eval_proc)
@@ -382,17 +370,12 @@ def main():
     with open(LOCK_FILE, 'w') as f:
         f.write(str(os.getpid()))
 
-    # Verify API key
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        os.remove(LOCK_FILE)
-        print("ERROR: ANTHROPIC_API_KEY not set.")
-        print("  Set it with: set ANTHROPIC_API_KEY=sk-ant-...")
-        sys.exit(1)
-
     total_input_tokens = 0
     total_output_tokens = 0
     total_cost = 0.0
     run_started_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    consecutive_failures = 0
+    last_error = None
 
     print(f"{'='*60}")
     print(f"AUTORESEARCH LOOP")
@@ -408,6 +391,15 @@ def main():
             exp_started_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             try:
+                # Auto-reset to best baseline after 3 consecutive failures
+                if consecutive_failures >= 3:
+                    best_backup = get_best_backup()
+                    if best_backup:
+                        shutil.copy2(best_backup, TRAIN_PY)
+                        print(f"  AUTO-RESET: {consecutive_failures} consecutive failures — restored best backup: {os.path.basename(best_backup)}")
+                        consecutive_failures = 0
+                        last_error = None
+
                 program = read_file(PROGRAM_MD)
                 results = load_results()
                 current_train = read_file(TRAIN_PY)
@@ -419,7 +411,7 @@ def main():
                              started_at=run_started_at, exp_started_at=exp_started_at)
 
                 description, plan, new_code, usage = get_agent_modification(
-                    exp_num, program, results, current_train
+                    exp_num, program, results, current_train, last_error=last_error
                 )
 
                 total_input_tokens += usage.input_tokens
@@ -434,6 +426,8 @@ def main():
                 try:
                     compile(new_code, "train.py", "exec")
                 except SyntaxError as e:
+                    last_error = f"SyntaxError in generated code: {e}"
+                    consecutive_failures += 1
                     print(f"  SYNTAX ERROR in agent code: {e} — skipping, restoring previous train.py")
                     append_result(exp_num, description, None, {}, None, None, "TRAIN_FAILED")
                     write_status("idle", exp_num, description, max_experiments=args.max_experiments,
@@ -444,9 +438,11 @@ def main():
 
                 write_status("training", exp_num, description, plan=plan, max_experiments=args.max_experiments,
                              started_at=run_started_at, exp_started_at=exp_started_at)
-                train_loss, train_time = run_experiment()
+                train_loss, train_time, train_stderr = run_experiment()
 
                 if train_loss is None:
+                    last_error = train_stderr or "Training subprocess returned non-zero exit code"
+                    consecutive_failures += 1
                     append_result(exp_num, description, None, {}, None, None, "TRAIN_FAILED")
                     backup = os.path.join(BACKUP_DIR, f"train_exp{exp_num:03d}.py")
                     shutil.copy2(backup, TRAIN_PY)
@@ -460,6 +456,8 @@ def main():
                 overall_acc, category_accs = run_evaluation()
 
                 if overall_acc is None:
+                    last_error = "Evaluation failed — model output may not contain \\boxed{} format"
+                    consecutive_failures += 1
                     append_result(exp_num, description, None, {}, train_loss, train_time, "EVAL_FAILED")
                     backup = os.path.join(BACKUP_DIR, f"train_exp{exp_num:03d}.py")
                     shutil.copy2(backup, TRAIN_PY)
@@ -468,6 +466,8 @@ def main():
                                  started_at=run_started_at, exp_started_at=exp_started_at)
                     continue
 
+                consecutive_failures = 0
+                last_error = None
                 append_result(exp_num, description, overall_acc, category_accs,
                               train_loss, train_time, "OK")
                 write_status("idle", exp_num, description, max_experiments=args.max_experiments,
@@ -495,6 +495,8 @@ def main():
             except Exception as e:
                 print(f"  ERROR: {e}")
                 traceback.print_exc()
+                last_error = f"{type(e).__name__}: {e}"
+                consecutive_failures += 1
                 append_result(exp_num, f"ERROR: {str(e)[:80]}", None, {}, None, None, "ERROR")
                 backup = os.path.join(BACKUP_DIR, f"train_exp{exp_num:03d}.py")
                 if os.path.exists(backup):

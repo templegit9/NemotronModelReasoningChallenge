@@ -1,17 +1,17 @@
 """
-Training script for autoresearch experiments.
+Training script for autoresearch experiments — Nemotron-3-Nano-30B-A3B on RunPod A100 80GB.
 THIS IS THE FILE THE AGENT MODIFIES.
 
-Trains a LoRA adapter on Qwen2.5-3B-Instruct using our formatted reasoning data.
-Designed to run on RTX 5070 Ti (16GB VRAM) in under 15 minutes.
+Trains a LoRA adapter on Nemotron-3-Nano-30B-A3B using our formatted reasoning data.
+Designed to run on A100 80GB in under 2 hours.
 """
 
 import json
 import os
 import random
 import time
-import re
 
+import mamba_ssm  # Must import before transformers to register Mamba kernels
 import numpy as np
 import torch
 from peft import LoraConfig, get_peft_model, TaskType
@@ -20,7 +20,6 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# Import the data loading function
 try:
     from prepare_data import load_train
 except ImportError:
@@ -28,52 +27,42 @@ except ImportError:
     def load_train():
         return []
 
-# ============================================================
-# Configuration — MODIFY THESE
-# ============================================================
 SEED = 42
-MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
-OUTPUT_DIR = os.path.join(os.environ.get("TEMP", "/tmp"), "autoresearch_adapter")
+MODEL_PATH = os.environ.get("MODEL_PATH", "/workspace/nemotron")
+OUTPUT_DIR = os.environ.get("ADAPTER_PATH", "/workspace/adapter")
 
-# LoRA config
-LORA_RANK = 16
-LORA_ALPHA = 16
+LORA_RANK = 32
+LORA_ALPHA = 64
 LORA_DROPOUT = 0.05
-LORA_TARGET_MODULES = ["q_proj", "v_proj"]
+# Regex pattern matching Mamba hybrid layers (in_proj/out_proj) and MLP layers (up_proj/down_proj)
+LORA_TARGET_MODULES = r".*\.(in_proj|out_proj|up_proj|down_proj)$"
 
-# Training config — NUM_EPOCHS must stay 1 (>1 epoch exceeds time limit)
 LEARNING_RATE = 2e-5
 NUM_EPOCHS = 1
 BATCH_SIZE = 1
 GRAD_ACCUM_STEPS = 8
-MAX_SEQ_LENGTH = 512
-MAX_TRAINING_STEPS = 500       # Hard cap: 500 steps × 8 accum × 0.32s ≈ 21 min
+MAX_SEQ_LENGTH = 2048
+MAX_TRAINING_STEPS = 150
 WARMUP_RATIO = 0.05
 WEIGHT_DECAY = 0.01
 
-# Data config
 CATEGORY_WEIGHTS = {
     "NUMBER_SYSTEM": 1.0,
     "UNIT_CONVERSION": 1.0,
-    "PHYSICS": 1.0,
+    "PHYSICS": 1.5,
     "TEXT_ENCRYPTION": 1.5,
     "BIT_MANIPULATION": 1.5,
     "SYMBOL_TRANSFORM": 1.5,
 }
 
-# Category-specific reasoning hints for prompting (Dimension 1)
-CATEGORY_HINTS = {
-    "NUMBER_SYSTEM": "Convert between number systems carefully. Work step-by-step through the conversion process.",
-    "UNIT_CONVERSION": "Identify the source and target units. Apply conversion factors systematically.",
-    "PHYSICS": "Apply physics principles and formulas. Show all intermediate calculations.",
-    "TEXT_ENCRYPTION": "Identify the cipher type (shift, substitution, etc.). Apply the decryption pattern consistently.",
-    "BIT_MANIPULATION": "Think in binary. Apply bitwise operations (AND, OR, XOR, shifts) step-by-step.",
-    "SYMBOL_TRANSFORM": "Map each symbol to its corresponding value. Apply the transformation rule consistently.",
+# Proven technique: prepend short reasoning hints to hard-category assistant messages
+REASONING_STARTERS = {
+    "TEXT_ENCRYPTION": "I need to analyze the encryption pattern and decode step by step.",
+    "BIT_MANIPULATION": "Let me think about the bit operations in binary representation.",
+    "SYMBOL_TRANSFORM": "I will trace through the symbol transformation rules carefully.",
+    "PHYSICS": "I need to identify the formula, extract the values, and compute step by step.",
 }
 
-# ============================================================
-# Setup
-# ============================================================
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
@@ -83,19 +72,13 @@ if torch.cuda.is_available():
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-# ============================================================
-# Data filtering and validation
-# ============================================================
 def has_boxed_answer(text):
-    """Check if text contains a \\boxed{...} answer."""
     return r'\boxed{' in text
 
 
 def filter_valid_examples(examples):
-    """Filter examples to only those with clear \\boxed{} answers."""
     valid = []
     for ex in examples:
-        # Check if assistant message has a boxed answer
         messages = ex.get('messages', [])
         if len(messages) >= 2:
             assistant_msg = messages[-1].get('content', '')
@@ -105,34 +88,22 @@ def filter_valid_examples(examples):
     return valid
 
 
-def inject_category_hints(examples):
-    """Inject category-specific reasoning hints into the system prompt."""
-    for ex in examples:
-        messages = ex.get('messages', [])
-        category = ex.get('category', 'UNKNOWN')
-        hint = CATEGORY_HINTS.get(category, "Solve this puzzle step-by-step.")
-        
-        base_system = f"""You are an expert reasoning assistant. {hint}
-After your reasoning, provide your final answer in the format: \\boxed{{answer}}
-Think carefully and show all work."""
-        
-        # Check if first message is a system message
-        if messages and messages[0].get('role') == 'system':
-            messages[0]['content'] = base_system
-        else:
-            messages.insert(0, {'role': 'system', 'content': base_system})
-    
-    return examples
+def inject_reasoning_starter(example):
+    category = example.get('category', 'UNKNOWN')
+    if category not in REASONING_STARTERS:
+        return example
+    messages = example.get('messages', [])
+    if len(messages) < 2:
+        return example
+    example = json.loads(json.dumps(example))
+    starter = REASONING_STARTERS[category]
+    assistant_content = example['messages'][-1]['content']
+    example['messages'][-1]['content'] = starter + "\n" + assistant_content
+    return example
 
 
-# ============================================================
-# Dataset
-# ============================================================
 class ReasoningDataset(Dataset):
     def __init__(self, examples, tokenizer, max_length):
-        # Pre-tokenize all examples upfront to avoid per-batch tokenization overhead.
-        # On-the-fly tokenization (~2s/sample × 8000+ samples = 4+ hours) exceeds the
-        # 30-minute training budget. Pre-tokenization completes in ~2-3 minutes.
         print(f"Pre-tokenizing {len(examples)} examples...")
         self.data = []
         for example in examples:
@@ -145,8 +116,6 @@ class ReasoningDataset(Dataset):
                 input_ids = full_tokens["input_ids"].squeeze(0)
                 attention_mask = full_tokens["attention_mask"].squeeze(0)
                 labels = input_ids.clone()
-                
-                # Compute prompt length (system + user, before assistant starts)
                 prompt_messages = [m for m in messages if m['role'] != 'assistant']
                 if prompt_messages:
                     prompt_text = tokenizer.apply_chat_template(
@@ -156,17 +125,13 @@ class ReasoningDataset(Dataset):
                     )
                 else:
                     prompt_text = ""
-                
                 prompt_len = len(tokenizer(prompt_text, truncation=True, max_length=max_length)["input_ids"])
                 labels[:prompt_len] = -100
-                
-                # Only add if there are actual labels to train on (not all -100)
                 if (labels != -100).any():
                     self.data.append({"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels})
             except Exception as e:
                 print(f"Skipping example due to error: {e}")
                 continue
-        
         print(f"Pre-tokenization complete. Valid examples: {len(self.data)}")
 
     def __len__(self):
@@ -192,12 +157,10 @@ def collate_fn(batch, pad_token_id):
 
 
 def apply_category_weights(examples, weights):
-    """Resample examples according to category weights."""
     weighted = []
     for ex in examples:
         cat = ex.get('category', 'UNKNOWN')
         w = weights.get(cat, 1.0)
-        # Repeat proportionally (floor + probabilistic for fractional)
         repeats = int(w)
         if random.random() < (w - repeats):
             repeats += 1
@@ -206,45 +169,34 @@ def apply_category_weights(examples, weights):
     return weighted
 
 
-# ============================================================
-# Main Training
-# ============================================================
 def main():
     start_time = time.time()
 
-    # Load data
     train_data = load_train()
     if not train_data:
-        print("ERROR: No training data loaded. Check prepare_data.py")
+        print("ERROR: No training data loaded.")
         return {"loss": float('inf'), "time_minutes": 0}
-    
+
     print(f"Raw training examples: {len(train_data)}")
-    
-    # Filter examples with valid \\boxed{{}} answers
     train_data = filter_valid_examples(train_data)
-    
-    # Inject category-specific reasoning hints into system prompt (Dimension 1)
-    train_data = inject_category_hints(train_data)
-    
-    # Apply category weights (oversample hard categories)
+    train_data = [inject_reasoning_starter(ex) for ex in train_data]
+    print(f"Injected reasoning starters into hard-category examples")
     train_data = apply_category_weights(train_data, CATEGORY_WEIGHTS)
     print(f"Training examples (after filtering and weighting): {len(train_data)}")
 
-    # Load model
-    print(f"Loading {MODEL_NAME}...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    print(f"Loading {MODEL_PATH}...")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
+        MODEL_PATH,
         torch_dtype=torch.bfloat16,
         device_map={"": 0},
         trust_remote_code=True,
     )
 
-    # Apply LoRA
     lora_config = LoraConfig(
         r=LORA_RANK,
         lora_alpha=LORA_ALPHA,
@@ -255,14 +207,14 @@ def main():
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
+    # NOTE: Gradient checkpointing is incompatible with Mamba layers — do NOT enable it.
     model.enable_input_require_grads()
 
-    # Dataset
     dataset = ReasoningDataset(train_data, tokenizer, MAX_SEQ_LENGTH)
     if len(dataset) == 0:
         print("ERROR: Dataset is empty after pre-tokenization!")
         return {"loss": float('inf'), "time_minutes": 0}
-    
+
     dataloader = DataLoader(
         dataset, batch_size=BATCH_SIZE, shuffle=True,
         collate_fn=lambda b: collate_fn(b, tokenizer.pad_token_id),
@@ -270,13 +222,11 @@ def main():
     )
     print(f"DataLoader: {len(dataloader)} batches per epoch")
 
-    # Optimizer
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     total_steps = len(dataloader) * NUM_EPOCHS // GRAD_ACCUM_STEPS
     warmup_steps = int(total_steps * WARMUP_RATIO)
     scheduler = CosineAnnealingLR(optimizer, T_max=max(total_steps, 1), eta_min=LEARNING_RATE * 0.1)
 
-    # Training loop
     model.train()
     global_step = 0
 
@@ -320,7 +270,6 @@ def main():
         avg_epoch_loss = epoch_loss / max(epoch_steps, 1)
         print(f"Epoch {epoch+1} done | Avg Loss: {avg_epoch_loss:.4f}")
 
-    # Handle remaining gradients
     if epoch_steps > 0 and (batch_idx + 1) % GRAD_ACCUM_STEPS != 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
@@ -329,7 +278,6 @@ def main():
     total_time = time.time() - start_time
     print(f"Training complete! Time: {total_time/60:.1f} minutes")
 
-    # Save adapter
     model.save_pretrained(OUTPUT_DIR)
     print(f"Adapter saved to {OUTPUT_DIR}")
 

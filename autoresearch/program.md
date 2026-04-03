@@ -56,15 +56,17 @@ The baseline approach — still important to optimize:
 - Different CoT length targets per category (short for easy, long for hard)
 
 ## Hard Constraints (DO NOT VIOLATE)
-- `BATCH_SIZE = 1` — 16GB VRAM limit, never increase
-- `NUM_EPOCHS = 1` — more epochs exceed time limit
-- `MAX_SEQ_LENGTH = 512` — lower values truncate assistant tokens → NaN loss
-- `MAX_TRAINING_STEPS = 400` — confirmed safe with REASONING_STARTERS; 500 causes timeout
-- `MAX_TRAINING_STEPS = 300–400` — keeps training within 45-min timeout. Use 400, NOT 500 — confirmed that 500 causes timeout with REASONING_STARTERS enabled
-- `LORA_RANK <= 32` — competition constraint
-- Only import: standard library, torch, transformers, peft, numpy
+- `BATCH_SIZE = 1` — safety default; A100 80GB could handle 2 but keep at 1 for stability
+- `NUM_EPOCHS = 1` — more epochs would exceed time budget
+- `MAX_SEQ_LENGTH = 2048` — do NOT lower (truncates Nemotron reasoning chains)
+- `MAX_TRAINING_STEPS = 150` — confirmed safe on A100 (~20-30 min); do NOT exceed 200
+- `LORA_RANK <= 32` — competition constraint (currently set to 32)
+- `LORA_TARGET_MODULES = r".*\.(in_proj|out_proj|up_proj|down_proj)$"` — Mamba hybrid layers; do NOT use q_proj/v_proj (those are transformer attention, not all Nemotron layers have them)
+- Only import: standard library, torch, transformers, peft, numpy, mamba_ssm
+- `import mamba_ssm` must stay at top (registers Mamba CUDA kernels before transformers loads model)
 - `prepare_data` import must stay unchanged
 - Pre-tokenize ALL data in `ReasoningDataset.__init__`, not in `__getitem__`
+- Do NOT add gradient checkpointing — incompatible with Mamba layers (causes RuntimeError)
 
 ## Strategy
 - Hard categories (BIT_MANIPULATION, SYMBOL_TRANSFORM) score near 0 — biggest opportunity
@@ -100,32 +102,36 @@ The baseline approach — still important to optimize:
 ### Pattern warning
 After a successful experiment, DO NOT immediately try something complex. The pattern of success → complex attempt → TRAIN_FAILED has repeated 3 times. After any OK result, make the **smallest possible next step** building on what worked.
 
-### Current confirmed baseline state (after exp 25 restores)
+### Current confirmed baseline state (Nemotron on RunPod A100 — experiment 1 start)
 The train.py you are working with should have:
-- `LORA_RANK = 16` (if not, set it to 16)
-- `LORA_ALPHA = 16` (if not, set it to 16)
-- `LEARNING_RATE = 2e-5` (or 5e-5 — next experiment to try)
-- `MAX_TRAINING_STEPS = 400` (NOT 500 — causes timeout)
-- `LORA_TARGET_MODULES = ["q_proj", "v_proj"]`
-- REASONING_STARTERS dict with inject_reasoning_starter() function PRESENT
+- `LORA_RANK = 32` (Nemotron baseline; max allowed by competition)
+- `LORA_ALPHA = 64` (2× rank — theoretically optimal)
+- `LEARNING_RATE = 2e-5`
+- `MAX_TRAINING_STEPS = 150` (safe on A100 ~20-30 min)
+- `LORA_TARGET_MODULES = r".*\.(in_proj|out_proj|up_proj|down_proj)$"` (regex, not list)
+- REASONING_STARTERS dict with inject_reasoning_starter() function PRESENT (proven +5-8% on Qwen proxy)
 - CATEGORY_WEIGHTS with 1.5× for hard categories
+- `import mamba_ssm` at top (required before transformers)
+- NO gradient checkpointing
 
-Before proposing any change, READ the current values in train.py and confirm this state. If any of these are wrong, first restore them before adding your change.
+Before proposing any change, READ the current values in train.py and confirm this state.
 
 ### Recommended next experiments (in priority order)
-1. **Tune LEARNING_RATE**: try 5e-5 — one number change to `LEARNING_RATE = 5e-5`
-2. **Expand LORA_TARGET_MODULES**: add `k_proj` — change to `["q_proj", "v_proj", "k_proj"]`
-3. **Try LORA_ALPHA=32** — one number change to `LORA_ALPHA = 32` (2× rank is often optimal)
-4. **Refine reasoning starters**: make them more specific (e.g. for BIT_MANIPULATION: "Let me convert each value to binary and apply the bitwise operation step by step.") — change only the string text
+1. **Baseline first** — run exp 1 with the default Nemotron baseline to establish what accuracy we get on this model before any changes
+2. **Tune LEARNING_RATE**: try 5e-5 — one number change to `LEARNING_RATE = 5e-5`
+3. **Refine reasoning starters**: make them more specific (e.g. for BIT_MANIPULATION: "Let me convert each value to binary and apply the bitwise operation step by step.") — change only the string text
+4. **Try LORA_ALPHA=32** — one number change (2× rank might be better for this model size)
 5. Only after the above are exhausted: simple data filtering (skip examples with assistant content shorter than 50 tokens)
 
 ## Infrastructure Notes (READ CAREFULLY before interpreting results)
-- ALL past EVAL_FAILEDs were caused by evaluation timing out — NOT a broken eval script and NOT a problem with model output format. The evaluation script works correctly. The timeout was caused by generating too many tokens per example (512 → now fixed at 128 max_new_tokens).
-- DO NOT change output formats, answer formats, or add "ANSWER:" prefixes to fix EVAL_FAILED. The eval script uses `\boxed{}` and fallback parsing that already works — changing the format may break it.
-- Experiments showing TRAIN_FAILED mean either a code error OR a training timeout (45-min hard limit). Check that you kept `model.enable_input_require_grads()` after `get_peft_model()`, did not use `torch.no_grad()` in the training loop, and did not detach the loss tensor.
-- **TRAINING TIMEOUT WARNING**: Training with REASONING_STARTERS + CATEGORY_WEIGHTS 1.5× takes ~41-46 min. This is dangerously close to the 45-min timeout. `MAX_TRAINING_STEPS` has been reduced to **400** (from 500) to give margin. Do NOT increase it back to 500. Use 400 or lower.
-- The baseline model (no modifications) trains successfully with loss ~0.9 in ~35 min.
-- When you see failures, DO NOT make drastic rewrites. Make ONE small targeted change.
-- If the last experiment was TRAIN_FAILED, try a simpler or different approach — do not repeat the same change.
-- NEVER remove `model.enable_input_require_grads()` — removing it causes `RuntimeError: element 0 of tensors does not require grad`.
-- NEVER add custom answer format tokens like "ANSWER:" or change the extract_answer logic — this breaks the evaluator.
+- Running on RunPod A100 80GB. Model is Nemotron-3-Nano-30B-A3B (Mamba-Transformer hybrid, ~60GB bf16).
+- MODEL_PATH=/workspace/nemotron, ADAPTER_PATH=/workspace/adapter (set as env vars by run_loop.py)
+- ALL past EVAL_FAILEDs were caused by evaluation timing out — NOT a broken eval script. max_new_tokens=128 is now set to prevent this.
+- DO NOT change output formats, answer formats, or add "ANSWER:" prefixes to fix EVAL_FAILED. The eval script uses `\boxed{}` and fallback parsing that already works.
+- Experiments showing TRAIN_FAILED mean either a code error OR a training timeout (4-hour limit). Check: `model.enable_input_require_grads()` present, no `torch.no_grad()` in training loop, loss tensor not detached.
+- **CRITICAL**: `import mamba_ssm` must stay at the TOP of train.py. Removing it breaks model loading.
+- **CRITICAL**: Do NOT add `gradient_checkpointing_enable()` — this crashes with Mamba layers.
+- **MAX_TRAINING_STEPS = 150** is safe on A100 (~20-30 min). Keep between 100 and 200.
+- When you see failures, make ONE small targeted change. Do NOT rewrite large sections.
+- NEVER remove `model.enable_input_require_grads()` — causes `RuntimeError: element 0 of tensors does not require grad`.
+- NEVER add custom answer format tokens like "ANSWER:" or change the extract_answer logic — breaks the evaluator.
